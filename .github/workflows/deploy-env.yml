@@ -41,6 +41,7 @@ jobs:
       ROOT: infra/gcp/env
     steps:
       - uses: actions/checkout@v4
+
       - name: Validar configuración
         env:
           VALUES: >-
@@ -58,50 +59,57 @@ jobs:
           failed=0
           for pair in $VALUES; do
             value="${pair#*=}"
-            if [ -z "$value" ] || [ "$value" = "__CAMBIAME__" ]; then
-              echo "::error::Falta definir o completar la variable ${pair%%=*}"
+            if [ -z "$value" ] || [[ "$value" == *"<"* ]]; then
+              echo "::error::Variable requerida no configurada o incompleta: ${pair%%=*}"
               failed=1
             fi
           done
-          [ "$failed" -eq 0 ] || exit 1
+          exit "$failed"
 
       - name: Autenticar con OIDC
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.AZURE_TENANT_ID }}
           service_account: ${{ vars.AZURE_CLIENT_ID }}
-          create_credentials_file: true
-          export_environment_variables: true
 
-      - name: Configurar Terraform
-        uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: ~> 1.11
+          terraform_version: 1.11.0
+          terraform_wrapper: false
 
       - name: Terraform init
+        env:
+          STATE_KEY: ledger-${{ inputs.environment }}
+          STATE_ACCOUNT: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}
         run: |
-          terraform -chdir="$ROOT" init \
-            -backend-config="bucket=${{ vars.TF_STATE_STORAGE_ACCOUNT }}" \
-            -backend-config="prefix=env/${{ inputs.environment }}"
+          terraform -chdir="$ROOT" init -input=false \
+            -backend-config="bucket=$STATE_ACCOUNT" \
+            -backend-config="prefix=$STATE_KEY"
+
+      - name: Terraform plan
+        run: terraform -chdir="$ROOT" plan -input=false -out=deploy.tfplan
 
       - name: Estimar costos con Infracost
         env:
-          INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
-          COST_BUDGET_USD: ${{ vars.COST_BUDGET_USD }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          BUDGET: ${{ vars.COST_BUDGET_USD }}
         run: |
-          python scripts/estimate.py \
-            --plan "$ROOT" \
-            --budget "$COST_BUDGET_USD" \
-            | tee infracost-comment.md
-          cat infracost-comment.md >> "$GITHUB_STEP_SUMMARY"
+          terraform -chdir="$ROOT" show -json deploy.tfplan > "$RUNNER_TEMP/plan.json"
+          python3 cost/estimate.py --offline --plan "$ENVIRONMENT=$RUNNER_TEMP/plan.json" --budget "$BUDGET" | tee "$RUNNER_TEMP/cost.txt"
+          {
+            echo "### Costo estimado de $ENVIRONMENT"
+            echo '```'
+            cat "$RUNNER_TEMP/cost.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Terraform apply
-        run: terraform -chdir="$ROOT" apply -auto-approve
+        run: terraform -chdir="$ROOT" apply -input=false -auto-approve deploy.tfplan
 
       - name: Prueba de humo
         env:
-          ENVIRONMENT: ${{ inputs.environment }}
+          ROOT: infra/gcp/env
         run: |
-          URL="$(terraform -chdir="$ROOT" output -raw app_url)"
+          URL=$(terraform -chdir="$ROOT" output -raw app_url)
+          echo "APP_URL=$URL" >> "$GITHUB_ENV"
           bash scripts/smoke.sh "$URL"
-          echo "### $ENVIRONMENT desplegado en $URL" >> "$GITHUB_STEP_SUMMARY"
