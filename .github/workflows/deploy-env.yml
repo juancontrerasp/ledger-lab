@@ -1,33 +1,4 @@
 # Workflow reutilizable: despliega un ambiente. deploy.yml lo llama una vez por ambiente,
-# de modo que dev y prod siguen exactamente los mismos pasos.
-name: deploy-env
-
-on:
-  workflow_call:
-    inputs:
-      environment:
-        description: Ambiente de GitHub y carpeta en infra/environments
-        type: string
-        required: true
-      image:
-        description: Imagen fijada por digest
-        type: string
-        required: true
-
-jobs:
-  deploy:
-    name: Desplegar ${{ inputs.environment }}
-    runs-on: ubuntu-latest
-    # Este nombre define el "subject" del token OIDC y activa las reglas de protección del ambiente.
-    environment: ${{ inputs.environment }}
-    concurrency: terraform-${{ inputs.environment }}
-    defaults:
-      run:
-        # Activa pipefail: sin esto, "estimate.py | tee" ocultaria el fallo del control de costos.
-        shell: bash
-    env:
-      ARM_USE_OIDC: "true"
-      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       TF_IN_AUTOMATION: "true"
@@ -103,5 +74,5 @@ jobs:
           ENVIRONMENT: ${{ inputs.environment }}
         run: |
           URL="$(terraform -chdir="$ROOT" output -raw app_url)"
-          scripts/smoke.sh "$URL"
+          bash scripts/smoke.sh "$URL"
           echo "### $ENVIRONMENT desplegado en $URL" >> "$GITHUB_STEP_SUMMARY"
