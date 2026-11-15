@@ -1,4 +1,33 @@
 # Workflow reutilizable: despliega un ambiente. deploy.yml lo llama una vez por ambiente,
+# de modo que dev y prod siguen exactamente los mismos pasos.
+name: deploy-env
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Ambiente de GitHub y carpeta en infra/environments
+        type: string
+        required: true
+      image:
+        description: Imagen fijada por digest
+        type: string
+        required: true
+
+jobs:
+  deploy:
+    name: Desplegar ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    # Este nombre define el "subject" del token OIDC y activa las reglas de protección del ambiente.
+    environment: ${{ inputs.environment }}
+    concurrency: terraform-${{ inputs.environment }}
+    defaults:
+      run:
+        # Activa pipefail: sin esto, "estimate.py | tee" ocultaria el fallo del control de costos.
+        shell: bash
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       TF_IN_AUTOMATION: "true"
@@ -29,46 +58,46 @@
           failed=0
           for pair in $VALUES; do
             value="${pair#*=}"
-            if [[ -z "$value" || "$value" == *"<"* || "$value" == *">"* ]]; then
-              echo "::error::Revise la variable ${pair%%=*}"
+            if [ -z "$value" ] || [ "$value" = "__CAMBIAME__" ]; then
+              echo "::error::Falta definir o completar la variable ${pair%%=*}"
               failed=1
             fi
           done
-          exit "$failed"
-      - name: Autenticar con OIDC (Workload Identity Federation)
+          [ "$failed" -eq 0 ] || exit 1
+
+      - name: Autenticar con OIDC
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.AZURE_TENANT_ID }}
           service_account: ${{ vars.AZURE_CLIENT_ID }}
-      - uses: hashicorp/setup-terraform@v3
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Configurar Terraform
+        uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: 1.17.1
-          terraform_wrapper: false
+          terraform_version: ~> 1.11
+
       - name: Terraform init
-        env:
-          STATE_KEY: ledger-${{ inputs.environment }}
-          STATE_ACCOUNT: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}
         run: |
-          terraform -chdir="$ROOT" init -input=false \
-            -backend-config="bucket=$STATE_ACCOUNT" \
-            -backend-config="prefix=$STATE_KEY"
-      - name: Terraform plan
-        run: terraform -chdir="$ROOT" plan -input=false -out=deploy.tfplan
-      - name: Control de costos
+          terraform -chdir="$ROOT" init \
+            -backend-config="bucket=${{ vars.TF_STATE_STORAGE_ACCOUNT }}" \
+            -backend-config="prefix=env/${{ inputs.environment }}"
+
+      - name: Estimar costos con Infracost
         env:
-          BUDGET: ${{ vars.COST_BUDGET_USD }}
-          ENVIRONMENT: ${{ inputs.environment }}
+          INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+          COST_BUDGET_USD: ${{ vars.COST_BUDGET_USD }}
         run: |
-          terraform -chdir="$ROOT" show -json deploy.tfplan > "$RUNNER_TEMP/plan.json"
-          python3 cost/estimate.py --offline --plan "$ENVIRONMENT=$RUNNER_TEMP/plan.json" --budget "$BUDGET" | tee "$RUNNER_TEMP/cost.txt"
-          {
-            echo "### Costo estimado de $ENVIRONMENT"
-            echo '```'
-            cat "$RUNNER_TEMP/cost.txt"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          python scripts/estimate.py \
+            --plan "$ROOT" \
+            --budget "$COST_BUDGET_USD" \
+            | tee infracost-comment.md
+          cat infracost-comment.md >> "$GITHUB_STEP_SUMMARY"
+
       - name: Terraform apply
-        run: terraform -chdir="$ROOT" apply -input=false deploy.tfplan
+        run: terraform -chdir="$ROOT" apply -auto-approve
+
       - name: Prueba de humo
         env:
           ENVIRONMENT: ${{ inputs.environment }}
