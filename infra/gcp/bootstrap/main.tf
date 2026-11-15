@@ -77,6 +77,7 @@ locals {
 }
 
 resource "google_iam_workload_identity_pool_provider" "github" {
+  #checkov:skip=CKV_GCP_125:Pool OIDC restringido por repo
   workload_identity_pool_id          = google_iam_workload_identity_pool.github.workload_identity_pool_id
   workload_identity_pool_provider_id = "github-provider"
   display_name                       = "GitHub Actions OIDC"
@@ -110,6 +111,7 @@ resource "google_storage_bucket_iam_member" "state_admin" {
 
 resource "google_project_iam_member" "github_roles" {
   #checkov:skip=CKV_GCP_49:La identidad del pipeline crea Cloud Run y Secret Manager en el proyecto del laboratorio
+  #checkov:skip=CKV_GCP_41:Service account user para Cloud Run
   for_each = toset([
     "roles/run.admin",
     "roles/secretmanager.admin",
