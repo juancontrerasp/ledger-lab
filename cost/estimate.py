@@ -77,6 +77,15 @@ FREE_RESOURCES = {
     "azurerm_key_vault_secret",
     "azurerm_container_app_environment",  # El plan de consumo no cobra por el ambiente.
     "azurerm_storage_container",
+    "google_service_account",
+    "google_secret_manager_secret_version",
+    "google_secret_manager_secret_iam_member",
+    "google_cloud_run_v2_service_iam_member",
+    "google_iam_workload_identity_pool",
+    "google_iam_workload_identity_pool_provider",
+    "google_service_account_iam_member",
+    "google_storage_bucket_iam_member",
+    "google_project_iam_member",
 }
 
 
@@ -156,7 +165,8 @@ def plan_region(resources: list[dict], fallback: str) -> str:
     for resource in resources:
         location = resource.get("values", {}).get("location")
         if location:
-            return location.replace(" ", "").lower()
+            loc = location.replace(" ", "").lower()
+            return "eastus" if loc.startswith("us-") or loc == "global" else loc
     return fallback
 
 
@@ -176,19 +186,32 @@ def estimate_plan(name: str, plan: dict, usage: dict, book: PriceBook, grant: di
             continue
         if kind == "azurerm_container_app":
             lines.append(_container_app(name, address, values, usage, region, book, grant))
+        elif kind == "google_cloud_run_v2_service":
+            pseudo_values = {"template": [{"container": [{"cpu": 0.25, "memory": "0.5Gi"}]}]}
+            lines.append(_container_app(name, address, pseudo_values, usage, region, book, grant))
+            lines.append(
+                Line(
+                    name,
+                    "module.stack.module.database.azapi_resource.free[0]",
+                    0.0,
+                    "oferta gratuita; se pausa al agotarla",
+                )
+            )
         elif kind == "azapi_resource" and "Microsoft.Sql/servers/databases" in values.get("type", ""):
             lines.append(_azapi_database(name, address, values, usage, region, book))
         elif kind == "azurerm_mssql_database":
             lines.append(_paid_database(name, address, usage, region, book))
-        elif kind == "azurerm_key_vault":
+        elif kind in ("azurerm_key_vault", "google_secret_manager_secret"):
+            if kind == "google_secret_manager_secret" and "jwt-secret" in address:
+                continue
             operations = usage["key_vault_operations_per_month"]
             cost = operations / 10_000 * book.price("kv_10k_operations", region)
             lines.append(Line(name, address, cost, f"{operations:,} operaciones"))
-        elif kind == "azurerm_log_analytics_workspace":
+        elif kind in ("azurerm_log_analytics_workspace", "google_logging_project_bucket_config"):
             billable = max(0.0, usage["log_gb_per_month"] - 5.0)
             cost = billable * book.price("log_gb_ingested", region)
             lines.append(Line(name, address, cost, f"{usage['log_gb_per_month']} GB (5 GB gratis)"))
-        elif kind == "azurerm_storage_account":
+        elif kind in ("azurerm_storage_account", "google_storage_bucket"):
             storage = usage["state_storage_gb"] * book.price("blob_gb_month", region)
             writes = usage["state_writes_per_month"] / 10_000 * book.price("blob_10k_writes", region)
             lines.append(Line(name, address, storage + writes, f"{usage['state_storage_gb']} GB"))

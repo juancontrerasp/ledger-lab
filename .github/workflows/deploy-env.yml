@@ -31,10 +31,14 @@ jobs:
       ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       TF_IN_AUTOMATION: "true"
+      TF_VAR_project_id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_environment: ${{ inputs.environment }}
       TF_VAR_location: ${{ vars.AZURE_LOCATION }}
       TF_VAR_database_location: ${{ vars.AZURE_DB_LOCATION }}
       TF_VAR_image: ${{ inputs.image }}
-      ROOT: infra/environments/${{ inputs.environment }}
+      TF_VAR_max_replicas: ${{ inputs.environment == 'prod' && '3' || '1' }}
+      TF_VAR_jwt_minutes: ${{ inputs.environment == 'prod' && '15' || '60' }}
+      ROOT: infra/gcp/env
     steps:
       - uses: actions/checkout@v4
       - name: Validar configuración
@@ -50,7 +54,7 @@ jobs:
             TF_STATE_CONTAINER=${{ vars.TF_STATE_CONTAINER }}
             COST_BUDGET_USD=${{ vars.COST_BUDGET_USD }}
         run: |
-          # Falla antes de tocar Azure si una variable falta o quedo con un texto de ejemplo.
+          # Falla antes de tocar la nube si una variable falta o quedo con un texto de ejemplo.
           failed=0
           for pair in $VALUES; do
             value="${pair#*=}"
@@ -60,22 +64,23 @@ jobs:
             fi
           done
           exit "$failed"
+      - name: Autenticar con OIDC (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.AZURE_TENANT_ID }}
+          service_account: ${{ vars.AZURE_CLIENT_ID }}
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.17.1
           terraform_wrapper: false
       - name: Terraform init
         env:
-          STATE_KEY: ledger-${{ inputs.environment }}.tfstate
-          STATE_RG: ${{ vars.TF_STATE_RESOURCE_GROUP }}
+          STATE_KEY: ledger-${{ inputs.environment }}
           STATE_ACCOUNT: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}
-          STATE_CONTAINER: ${{ vars.TF_STATE_CONTAINER }}
         run: |
           terraform -chdir="$ROOT" init -input=false \
-            -backend-config="resource_group_name=$STATE_RG" \
-            -backend-config="storage_account_name=$STATE_ACCOUNT" \
-            -backend-config="container_name=$STATE_CONTAINER" \
-            -backend-config="key=$STATE_KEY"
+            -backend-config="bucket=$STATE_ACCOUNT" \
+            -backend-config="prefix=$STATE_KEY"
       - name: Terraform plan
         run: terraform -chdir="$ROOT" plan -input=false -out=deploy.tfplan
       - name: Control de costos
@@ -84,7 +89,7 @@ jobs:
           ENVIRONMENT: ${{ inputs.environment }}
         run: |
           terraform -chdir="$ROOT" show -json deploy.tfplan > "$RUNNER_TEMP/plan.json"
-          python3 cost/estimate.py --plan "$ENVIRONMENT=$RUNNER_TEMP/plan.json" --budget "$BUDGET" | tee "$RUNNER_TEMP/cost.txt"
+          python3 cost/estimate.py --offline --plan "$ENVIRONMENT=$RUNNER_TEMP/plan.json" --budget "$BUDGET" | tee "$RUNNER_TEMP/cost.txt"
           {
             echo "### Costo estimado de $ENVIRONMENT"
             echo '```'
